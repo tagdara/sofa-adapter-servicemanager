@@ -19,6 +19,9 @@ import json
 import asyncio
 import aiohttp
 import subprocess
+import pystemd
+from pystemd.systemd1 import Unit
+import datetime
 
 class servicemanager(sofabase):
     
@@ -26,7 +29,10 @@ class servicemanager(sofabase):
         
         @property            
         def connectivity(self):
-            return 'OK'
+            if 'service' in self.nativeObject and 'ActiveState' in self.nativeObject['service']:
+                if self.nativeObject['service']['ActiveState']=='active':
+                    return 'OK'
+            return 'UNREACHABLE'
 
     class AdapterHealth(devices.AdapterHealth):
         
@@ -61,24 +67,31 @@ class servicemanager(sofabase):
             if 'logged' in self.nativeObject:
                 return self.nativeObject['logged']
             else:
-                return {}
+                return {'ERROR':0, 'INFO':0}
 
         @property
         def startup(self):
-            if 'rest' in self.nativeObject and 'startup' in self.nativeObject['rest']:
-                return self.nativeObject['rest']['startup']
-            else:
-                return ''
+            try:
+                if 'service' in self.nativeObject and 'ActiveState' in self.nativeObject['service']:
+                    if self.nativeObject['service']['ActiveState']=='active':
+                        return datetime.datetime.fromtimestamp(self.nativeObject['service']['ExecMainStartTimestamp']).isoformat()
+                if 'rest' in self.nativeObject and 'startup' in self.nativeObject['rest']:
+                    return self.nativeObject['rest']['startup']
+            except:
+                self.log.error('!! Error getting startup time', exc_info=True)
+                
+            return ''
 
 
     class PowerController(devices.PowerController):
 
         @property            
         def powerState(self):
-            if 'rest' in self.nativeObject and 'startup' in self.nativeObject['rest']:
-                return 'ON'
-            else:
-                return 'OFF'
+            if 'service' in self.nativeObject and 'ActiveState' in self.nativeObject['service']:
+                if self.nativeObject['service']['ActiveState']=='active':
+                    return 'ON'
+            return 'OFF'
+            
 
         async def TurnOn(self, correlationToken='', **kwargs):
             try:
@@ -104,7 +117,7 @@ class servicemanager(sofabase):
             self.dataset=dataset
             self.log=log
             self.notify=notify
-            self.polltime=30
+            self.polltime=10
             self.loop=loop
             self.dataset.nativeDevices['adapters']={}
             
@@ -123,7 +136,7 @@ class servicemanager(sofabase):
                     self.log.error('!! Error polling for data', exc_info=True)
                     
         # Utility Functions
-        
+ 
         async def add_defined_adapters(self):
             
             try:
@@ -144,6 +157,7 @@ class servicemanager(sofabase):
                             adapterstate['state']=await self.get_adapter_status(adapter)
                     adapterstate['service']=await self.get_service_status(adapter)
                     #adapterstate['rest']=self.dataset.nativeDevices['adapters'][adapter]
+                    
                     await self.dataset.ingest({'adapters': { adapter : adapterstate}})
                     
             except:
@@ -205,8 +219,34 @@ class servicemanager(sofabase):
             except:
                 self.log.error('!! Error getting status for adapter %s at %s' % (adaptername, url), exc_info=True)
                 return {}
-                
+
         async def get_service_status(self, adaptername):
+            
+            try:
+                unit = Unit(str.encode('sofa-%s.service' % adaptername))
+                unit.load()
+                unit.Unit.ActiveState
+                unit.Unit.SubState
+                #unit.Unit.stop()
+                processes=unit.Service.GetProcesses()
+                mainprocess=""
+                for process in processes:
+                    if process[1]==unit.Service.MainPID:
+                        mainprocess=process[2].decode()
+                return {
+                    "ActiveState": unit.Unit.ActiveState.decode(), 
+                    "SubState": unit.Unit.SubState.decode(), 
+                    "ExecMainPID": unit.Service.MainPID, 
+                    "Process": mainprocess,
+                    "ExecMainStartTimestamp": int(str(unit.Service.ExecMainStartTimestamp)[:10]), 
+                    "LoadState": unit.Unit.LoadState.decode()
+                }
+            except:
+                self.log.error('!! Error getting adapter service status', exc_info=True)
+                return {}
+
+                
+        async def old_get_service_status(self, adaptername):
             
             try:
                 keep=['WatchdogTimestamp', 'ExecMainStartTimestamp', 'LoadState', 'Result', 'ExecMainPID','ActiveState', 'SubState']
