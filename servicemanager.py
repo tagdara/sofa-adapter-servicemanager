@@ -64,8 +64,8 @@ class servicemanager(sofabase):
 
         @property
         def logged(self):
-            if 'logged' in self.nativeObject:
-                return self.nativeObject['logged']
+            if 'state' in self.nativeObject and 'logged' in self.nativeObject['state']:
+                return self.nativeObject['state']['logged']
             else:
                 return {'ERROR':0, 'INFO':0}
 
@@ -95,6 +95,7 @@ class servicemanager(sofabase):
 
         async def TurnOn(self, correlationToken='', **kwargs):
             try:
+                self.nativeObject['logged']={'ERROR':0, 'INFO':0}
                 stdoutdata = subprocess.getoutput("/opt/sofa-server/svc %s" % self.nativeObject['name'])
                 #return web.Response(text=stdoutdata)
                 return self.device.Response(correlationToken)
@@ -104,7 +105,12 @@ class servicemanager(sofabase):
 
         async def TurnOff(self, correlationToken='', **kwargs):
             try:
-                stdoutdata = subprocess.getoutput("systemctl stop sofa-%s" % self.nativeObject['name'])
+                pids_output=subprocess.check_output(["pgrep","-f","sofa-server/adapters/%s/" % self.nativeObject['name']])
+                pids=pids_output.decode().strip().split('\n')
+                stdoutdata=""
+                for pid in pids:
+                    stdoutdata += subprocess.getoutput("kill -9 %s" % pid)
+                self.log.info('.. results from kill %s (%s): %s' % (self.nativeObject['name'], pids, stdoutdata))
                 #return web.Response(text=stdoutdata)
                 return self.device.Response(correlationToken)
             except:
@@ -149,15 +155,18 @@ class servicemanager(sofabase):
         async def adapter_checker(self):
             
             try:
-                workingadapters=self.dataset.config['adapters']
+                workingadapters=self.dataset.baseConfig['adapters']
                 for adapter in workingadapters:
                     adapterstate={"state":{}, "service":{}, "rest": {}}
                     if adapter in self.dataset.nativeDevices['adapters']:
-                        if 'port' in self.dataset.nativeDevices['adapters'][adapter]:
+                        if 'port' in self.dataset.nativeDevices['adapters'][adapter]['rest']:
                             adapterstate['state']=await self.get_adapter_status(adapter)
+                    else:
+                        self.log.warning('.. adapter %s not in %s' % (adapter, self.dataset.nativeDevices['adapters']))
                     adapterstate['service']=await self.get_service_status(adapter)
                     #adapterstate['rest']=self.dataset.nativeDevices['adapters'][adapter]
                     
+                    self.log.info('.. adapter check %s - %s' % (adapter, adapterstate))
                     await self.dataset.ingest({'adapters': { adapter : adapterstate}})
                     
             except:
@@ -177,7 +186,7 @@ class servicemanager(sofabase):
         async def virtualUpdateAdapter(self, adapter, adapterdata):
             
             try:
-                self.log.info('.. getting updated adapter status for %s' % adapter)
+                self.log.info('.. getting updated adapter status for %s - %s' % (adapter,adapterdata))
                 await self.get_adapter_status(adapter)
             except:
                 self.log.info('!. Error updating adapter status after discovery: %s' % adapter, exc_info=True)
@@ -188,6 +197,7 @@ class servicemanager(sofabase):
             try:
                 if path.split("/")[1]=="adapters":
                     nativeObject=self.dataset.getObjectFromPath(self.dataset.getObjectPath(path))
+                    #self.log.info('native: %s %s' % (path,nativeObject))
                     if nativeObject['name'] not in self.dataset.localDevices: 
                         deviceid=path.split("/")[2]
                         device=devices.alexaDevice('servicemanager/adapters/%s' % deviceid, deviceid, displayCategories=['ADAPTER'], adapter=self)
@@ -203,6 +213,7 @@ class servicemanager(sofabase):
         async def get_adapter_status(self, adaptername):
             
             try:
+                result=""
                 url = 'http://%s:%s/status' % (self.dataset.adapters[adaptername]['address'], self.dataset.adapters[adaptername]['port'])
                 async with aiohttp.ClientSession() as client:
                     async with client.get(url) as response:
@@ -217,7 +228,7 @@ class servicemanager(sofabase):
                 return {}
 
             except:
-                self.log.error('!! Error getting status for adapter %s at %s' % (adaptername, url), exc_info=True)
+                self.log.error('!! Error getting status for adapter %s at %s = %s' % (adaptername, url, result), exc_info=True)
                 return {}
 
         async def get_service_status(self, adaptername):
@@ -268,10 +279,8 @@ class servicemanager(sofabase):
             
             try:
                 stdoutdata = subprocess.getoutput("/opt/sofa-server/svc %s" % adaptername)
-    
             except:
                 self.log.error('!! Error restarting adapter', exc_info=True)
-
 
 
 if __name__ == '__main__':
